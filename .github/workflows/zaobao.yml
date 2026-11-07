@@ -8,6 +8,10 @@ on:
 jobs:
   auto-post:
     runs-on: ubuntu-latest
+    # runner 失联（runner_system_error）自动重试一次，覆盖本次这类基础设施抖动
+    timeout-minutes: 15
+    retry:
+      max-attempts: 2
     env:
       TZ: Asia/Shanghai
       CONFIG: ${{ secrets.CONFIG }}

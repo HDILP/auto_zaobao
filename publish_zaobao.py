@@ -157,6 +157,7 @@ def upload_image(file_path):
                 headers=HEADERS,
                 data=payload,
                 files=files,
+                timeout=30,
             )
 
             if response.status_code != 200:
@@ -238,6 +239,7 @@ def publish_article(image_urls):
             url,
             data=payload,
             headers=HEADERS,
+            timeout=30,
         )
 
         print("发布响应:", response.text)
