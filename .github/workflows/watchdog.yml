@@ -15,6 +15,11 @@ on:
     - cron: '30 9 * * *'
     - cron: '30 13 * * *'
   workflow_dispatch:
+    inputs:
+      force:
+        description: '忽略状态文件，强制执行一次补发检查（用于验证看门狗链路）'
+        type: boolean
+        default: false
 
 permissions:
   actions: write   # 需要 dispatch 其它 workflow
@@ -54,7 +59,7 @@ jobs:
           fi
 
       - name: 补发早报
-        if: steps.state.outputs.published != 'true'
+        if: steps.state.outputs.published != 'true' || inputs.force
         env:
           GH_TOKEN: ${{ secrets.REPO_DISPATCH_PAT || github.token }}
         run: |
