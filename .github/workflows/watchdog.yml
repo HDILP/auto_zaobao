@@ -1,23 +1,26 @@
 name: 早报发布看门狗 (Watchdog)
 
 # 为什么需要它：GitHub 托管 runner 偶发 "runner lost communication with the
-# server"，那种失败发生在平台侧，job 内部任何 retry 都救不了（历史上 11-07
-# 那次就是发布成功后 runner 失联、整轮被判失败）。
-# 这里用一个独立的定时 workflow 补位：今天还没发布成功就补发一次。
+# server"，这种失败发生在平台侧，job 内部任何 retry 都救不了（2026-11-07 那次
+# 就是文章已经发布成功、随后 runner 失联，整轮被判失败）。
 #
-# 去重依赖仓库里的 publish_state.json（发布成功后由主 workflow 提交），
-# 所以补发不会造成同一天重复发文章。
+# 判断逻辑（宁可不动，也不误发）：
+#   1. publish_state.json 的日期已经是今天  -> 已发布，什么都不做
+#   2. 今天有 run 还在跑                      -> 不打扰
+#   3. 今天有 run 且已经成功                 -> 不补发
+#   4. 今天没有任何 zaobao.yml 的 run        -> 上游没推数据，不补发（避免拿旧闻充今天）
+#   5. 今天有 run 但全部失败、没有成功        -> 补发一次（allow_republish=false，保证不重复发文）
 
 on:
   schedule:
-    # 北京时间 09:30 / 17:30 / 21:30 三个检查点
-    - cron: '30 1 * * *'
+    # 北京时间 17:30 / 21:30 / 23:30，都晚于正常发布窗口（14:00-16:30 CST）
     - cron: '30 9 * * *'
     - cron: '30 13 * * *'
+    - cron: '30 15 * * *'
   workflow_dispatch:
     inputs:
       force:
-        description: '忽略状态文件，强制执行一次补发检查（用于验证看门狗链路）'
+        description: '忽略所有判断，强制走一次补发链路（仅用于验证）'
         type: boolean
         default: false
 
@@ -37,36 +40,70 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: 判断今天是否已发布
+      - name: 判断今天是否该补发
         id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           TODAY=$(TZ=Asia/Shanghai date +%F)
           echo "today=$TODAY" >> "$GITHUB_OUTPUT"
 
+          # 今天 00:00 (CST) 对应的 UTC 时间，用来过滤 run
+          START_UTC=$(python3 -c "
+          from datetime import datetime, timezone, timedelta
+          tz = timezone(timedelta(hours=8))
+          d = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+          print(d.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))
+          ")
+          echo "今天起点(UTC): $START_UTC"
+
           if [ -f publish_state.json ]; then
-            LAST=$(python -c 'import json;print(json.load(open("publish_state.json")).get("date",""))')
+            LAST=$(python3 -c 'import json;print(json.load(open("publish_state.json")).get("date",""))')
+            ARTICLE=$(python3 -c 'import json;print(json.load(open("publish_state.json")).get("article_id",""))')
           else
             LAST=""
+            ARTICLE=""
           fi
-          echo "state_date=$LAST"
+          echo "state_date=$LAST  article_id=$ARTICLE"
+
+          # 拉今天所有 zaobao.yml 的 run
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/zaobao.yml/runs?per_page=60" \
+            --jq --arg s "$START_UTC" '[.workflow_runs[] | select(.created_at >= $s)]' \
+            > today_runs.json
+
+          TOTAL=$(python3 -c 'import json;print(len(json.load(open("today_runs.json"))))')
+          SUCCESS=$(python3 -c 'import json;print(sum(1 for r in json.load(open("today_runs.json")) if r["conclusion"]=="success"))')
+          RUNNING=$(python3 -c 'import json;print(sum(1 for r in json.load(open("today_runs.json")) if r["status"]!="completed"))')
+
+          echo "今天 run 数=$TOTAL 成功=$SUCCESS 未完成=$RUNNING"
+          echo "today_runs=$TOTAL" >> "$GITHUB_OUTPUT"
+
+          DECISION="skip"
 
           if [ "$LAST" = "$TODAY" ]; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-            echo "✅ 今天（$TODAY）已发布，无需补发。"
+            echo "✅ 跳过：状态文件显示今天已发布（文章 id：${ARTICLE:-?}）"
+          elif [ "$RUNNING" -gt 0 ]; then
+            echo "⏳ 跳过：今天已有 run 正在运行，不打扰"
+          elif [ "$SUCCESS" -gt 0 ]; then
+            echo "✅ 跳过：今天已有成功的 run"
+          elif [ "$TOTAL" -eq 0 ]; then
+            echo "🤷 跳过：今天还没有任何 run（上游 zaobao_v2 未推送数据？），不补发，避免发布过期内容"
           else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-            echo "⚠️ 今天（$TODAY）尚未发布（状态文件日期：${LAST:-无}），准备补发。"
+            DECISION="dispatch"
+            echo "⚠️ 补发：今天有 $TOTAL 个 run 但全部失败，触发一轮补发"
           fi
 
+          echo "decision=$DECISION" >> "$GITHUB_OUTPUT"
+
       - name: 补发早报
-        if: steps.state.outputs.published != 'true' || inputs.force
+        if: steps.state.outputs.decision == 'dispatch' || inputs.force
         env:
           GH_TOKEN: ${{ secrets.REPO_DISPATCH_PAT || github.token }}
         run: |
-          # allow_republish=false：万一状态文件没来得及提交，也不会重复发文章，
-          # 脚本内部还有一道按日期的兜底判断。
+          # allow_republish=false：即使状态文件没来得及提交，脚本内还有按日期兜底，
+          # 绝不会同一天发两篇。
           gh workflow run zaobao.yml \
             --repo "$GITHUB_REPOSITORY" \
-            --ref "$(git rev-parse --abbrev-ref HEAD)" \
+            --ref "${GITHUB_REF_NAME}" \
             -f allow_republish=false
-          echo "已触发 zaobao.yml，稍后在 Actions 页确认结果。"
+          echo "已触发 zaobao.yml（allow_republish=false），稍后到 Actions 页确认结果。"
