@@ -1,0 +1,67 @@
+name: 早报发布看门狗 (Watchdog)
+
+# 为什么需要它：GitHub 托管 runner 偶发 "runner lost communication with the
+# server"，那种失败发生在平台侧，job 内部任何 retry 都救不了（历史上 11-07
+# 那次就是发布成功后 runner 失联、整轮被判失败）。
+# 这里用一个独立的定时 workflow 补位：今天还没发布成功就补发一次。
+#
+# 去重依赖仓库里的 publish_state.json（发布成功后由主 workflow 提交），
+# 所以补发不会造成同一天重复发文章。
+
+on:
+  schedule:
+    # 北京时间 09:30 / 17:30 / 21:30 三个检查点
+    - cron: '30 1 * * *'
+    - cron: '30 9 * * *'
+    - cron: '30 13 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write   # 需要 dispatch 其它 workflow
+  contents: read   # 读取 publish_state.json
+
+concurrency:
+  group: zaobao-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: 判断今天是否已发布
+        id: state
+        run: |
+          TODAY=$(TZ=Asia/Shanghai date +%F)
+          echo "today=$TODAY" >> "$GITHUB_OUTPUT"
+
+          if [ -f publish_state.json ]; then
+            LAST=$(python -c 'import json;print(json.load(open("publish_state.json")).get("date",""))')
+          else
+            LAST=""
+          fi
+          echo "state_date=$LAST"
+
+          if [ "$LAST" = "$TODAY" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "✅ 今天（$TODAY）已发布，无需补发。"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "⚠️ 今天（$TODAY）尚未发布（状态文件日期：${LAST:-无}），准备补发。"
+          fi
+
+      - name: 补发早报
+        if: steps.state.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.REPO_DISPATCH_PAT || github.token }}
+        run: |
+          # allow_republish=false：万一状态文件没来得及提交，也不会重复发文章，
+          # 脚本内部还有一道按日期的兜底判断。
+          gh workflow run zaobao.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$(git rev-parse --abbrev-ref HEAD)" \
+            -f allow_republish=false
+          echo "已触发 zaobao.yml，稍后在 Actions 页确认结果。"

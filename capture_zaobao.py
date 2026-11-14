@@ -3,7 +3,7 @@ import os
 from playwright.async_api import async_playwright
 
 # 配置信息
-TARGET_URL = "https://zaobao-v2.hdilp.top/"
+TARGET_URL = os.environ.get("TARGET_URL", "https://zaobao-v2.hdilp.top/")
 WIDTH = 720
 HEIGHT = 960
 SAVE_DIR = "screenshots"
