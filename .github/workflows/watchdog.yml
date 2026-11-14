@@ -68,12 +68,20 @@ jobs:
 
           # 拉今天所有 zaobao.yml 的 run
           gh api "repos/$GITHUB_REPOSITORY/actions/workflows/zaobao.yml/runs?per_page=60" \
-            --jq --arg s "$START_UTC" '[.workflow_runs[] | select(.created_at >= $s)]' \
-            > today_runs.json
+            > all_runs.json
 
-          TOTAL=$(python3 -c 'import json;print(len(json.load(open("today_runs.json"))))')
-          SUCCESS=$(python3 -c 'import json;print(sum(1 for r in json.load(open("today_runs.json")) if r["conclusion"]=="success"))')
-          RUNNING=$(python3 -c 'import json;print(sum(1 for r in json.load(open("today_runs.json")) if r["status"]!="completed"))')
+          STATS=$(START_UTC="$START_UTC" python3 -c '
+          import json, os
+          runs = json.load(open("all_runs.json"))["workflow_runs"]
+          start = os.environ["START_UTC"]
+          today = [r for r in runs if r["created_at"] >= start]
+          json.dump(today, open("today_runs.json", "w"))
+          total = len(today)
+          success = sum(1 for r in today if r["conclusion"] == "success")
+          running = sum(1 for r in today if r["status"] != "completed")
+          print(total, success, running)
+          ')
+          read -r TOTAL SUCCESS RUNNING <<< "$STATS"
 
           echo "今天 run 数=$TOTAL 成功=$SUCCESS 未完成=$RUNNING"
           echo "today_runs=$TOTAL" >> "$GITHUB_OUTPUT"
